@@ -1,0 +1,7 @@
+# core engine + demo use only the standard library (Python 3.10+)
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+pytest>=8.0
+# optional: IsolationForestDetector
+# scikit-learn>=1.4

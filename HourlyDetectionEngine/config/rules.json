@@ -1,0 +1,67 @@
+[
+  {
+    "rule_id": "EDR-001",
+    "source": "edr",
+    "type": "pattern",
+    "severity": "high",
+    "description": "Encoded PowerShell command",
+    "conditions": [
+      {"field": "process_name", "op": "equals_ci", "value": "powershell.exe"},
+      {"field": "process_args", "op": "contains_ci", "value": "-enc"}
+    ]
+  },
+  {
+    "rule_id": "EDR-002",
+    "source": "edr",
+    "type": "pattern",
+    "severity": "critical",
+    "description": "Root process started from /tmp",
+    "conditions": [
+      {"field": "process_path", "op": "startswith_ci", "value": "/tmp/"},
+      {"field": "uid", "op": "eq", "value": 0}
+    ]
+  },
+  {
+    "rule_id": "EDR-003",
+    "source": "edr",
+    "type": "pattern",
+    "severity": "medium",
+    "description": "DEMO: broken regex -> COMPILE error in dead letters",
+    "conditions": [
+      {"field": "process_args", "op": "regex", "value": "(unclosed"}
+    ]
+  },
+  {
+    "rule_id": "EDR-004",
+    "source": "edr",
+    "type": "pattern",
+    "severity": "low",
+    "description": "DEMO: numeric compare on a string field -> RUNTIME error, isolated",
+    "conditions": [
+      {"field": "process_args", "op": "gt", "value": 100}
+    ]
+  },
+  {
+    "rule_id": "AUTH-001",
+    "source": "auth",
+    "type": "threshold",
+    "severity": "high",
+    "description": "Brute force: >= 10 failed logins per user in one hour",
+    "group_by": "username",
+    "threshold": 10,
+    "conditions": [
+      {"field": "outcome", "op": "eq", "value": "FAILURE"}
+    ]
+  },
+  {
+    "rule_id": "AUTH-002",
+    "source": "auth",
+    "type": "ml_anomaly",
+    "severity": "medium",
+    "description": "Login volume per user far above its 7-day baseline",
+    "group_by": "username",
+    "lookback_hours": 168,
+    "z_threshold": 3.5,
+    "min_history": 24
+  }
+]
