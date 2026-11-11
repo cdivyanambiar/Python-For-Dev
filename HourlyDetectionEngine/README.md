@@ -123,22 +123,22 @@ What the demo shows:
 
 ## 5. Design patterns – where and why
 
-| Pattern | Where | Why / interview line |
-|---|---|---|
-| **Strategy** | `Rule` subclasses in `rules.py`, `MLAnomalyRule` | Engine calls `start/observe/finish` on every rule without knowing its type |
-| **Registry + Factory** | `@register("threshold")`, `create_rule(cfg)` | Add new rule types without editing the engine (Open/Closed principle) |
-| **Template Method** | `GroupCountRule` (`prepare`, `evaluate_group`); `BackgroundWorker` (`tick`, `seconds_until_next`) | Base class owns the algorithm; subclasses fill in the steps |
-| **Decorator (structural)** | `GuardedRule` wraps a `Rule`, delegates with `__getattr__` | Adds error isolation without changing any rule |
-| **Circuit breaker** | `GuardedRule.tripped` (per run), `rule_health` auto-disable (across runs) | Stop calling something that keeps failing |
-| **Adapter** | `MLAnomalyRule` adapts `RobustZScoreDetector` to `Rule` | ML plugs into the same pipeline |
-| **Repository** | `SQLiteStore` behind the `DetectionStore` Protocol | Swap SQLite for S3/ClickHouse/Postgres; easy to fake in tests |
-| **Observer / Pub-Sub** | `NotificationHub` + subscribers | Engine publishes events; Slack/PagerDuty/log subscribe |
-| **Dependency Injection / Composition root** | `container.py`, FastAPI `Depends` | Only one place creates concrete classes |
-| **Dead Letter Queue** | `dead_letters` table | Failures are kept for debugging; the run continues |
-| **Retry + exponential backoff + jitter** | `utils.retry`, `AlertWriter._write`, `WebhookNotifier._post` | Only for transient errors |
-| **Batching / buffered writer** | `AlertWriter` | Fewer round trips; one bulk insert |
-| **Idempotency** | delete+insert per (source, hour), `UNIQUE(run_hour, rule_id, event_id)` | Retries/backfills never create duplicates |
-| **Prototype-ish** | `catalog.build` creates fresh rule objects each run | Stateful rules never leak state between runs |
+| Pattern | In simple words | Where | Why / interview line |
+|---|---|---|---|
+| **Strategy** | Many workers share the same job description; the manager just says "do your job" and each does it their own way. | `Rule` subclasses in `rules.py`, `MLAnomalyRule` | Engine calls `start/observe/finish` on every rule without knowing its type |
+| **Registry + Factory** | A menu and a kitchen: you order a dish by name ("threshold"), the kitchen looks it up and makes it. A new dish only needs a new menu entry. | `@register("threshold")`, `create_rule(cfg)` | Add new rule types without editing the engine (Open/Closed principle) |
+| **Template Method** | A fill-in-the-blanks form: the steps are fixed, each person fills in only their own blanks. | `GroupCountRule` (`prepare`, `evaluate_group`); `BackgroundWorker` (`tick`, `seconds_until_next`) | Base class owns the algorithm; subclasses fill in the steps |
+| **Decorator (structural)** | A phone case: it adds protection without changing the phone. | `GuardedRule` wraps a `Rule`, delegates with `__getattr__` | Adds error isolation without changing any rule |
+| **Circuit breaker** | The fuse in your house: if something keeps sparking, the fuse trips and cuts it off before it damages everything else. | `GuardedRule.tripped` (per run), `rule_health` auto-disable (across runs) | Stop calling something that keeps failing |
+| **Adapter** | A travel plug adapter: your charger works in a foreign socket without changing the charger or the wall. | `MLAnomalyRule` adapts `RobustZScoreDetector` to `Rule` | ML plugs into the same pipeline |
+| **Repository** | A librarian: you ask for a book, and you don't care which shelf or building it's in. | `SQLiteStore` behind the `DetectionStore` Protocol | Swap SQLite for S3/ClickHouse/Postgres; easy to fake in tests |
+| **Observer / Pub-Sub** | A YouTube channel: the creator posts once and every subscriber gets notified; the creator doesn't call each person. | `NotificationHub` + subscribers | Engine publishes events; Slack/PagerDuty/log subscribe |
+| **Dependency Injection / Composition root** | A restaurant kitchen gets ingredients delivered instead of growing its own; one supplier list decides who delivers what. | `container.py`, FastAPI `Depends` | Only one place creates concrete classes |
+| **Dead Letter Queue** | The post office's "undeliverable mail" box: problem letters are set aside for checking while the rest of the mail goes out. | `dead_letters` table | Failures are kept for debugging; the run continues |
+| **Retry + exponential backoff + jitter** | Calling a busy friend: try again after 1 min, then 2, then 4, at slightly random times so everyone doesn't call at the same moment. | `utils.retry`, `AlertWriter._write`, `WebhookNotifier._post` | Only for transient errors |
+| **Batching / buffered writer** | Fill the washing machine before you run it instead of washing one sock at a time. | `AlertWriter` | Fewer round trips; one bulk insert |
+| **Idempotency** | Pressing the lift button 5 times still calls the lift once. Re-running the same hour gives the same result. | delete+insert per (source, hour), `UNIQUE(run_hour, rule_id, event_id)` | Retries/backfills never create duplicates |
+| **Prototype-ish** | A fresh exam paper for every student, so no one sees the previous student's answers. | `catalog.build` creates fresh rule objects each run | Stateful rules never leak state between runs |
 
 **SOLID:**
 - **S:** each module has one job.
