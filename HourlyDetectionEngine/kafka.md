@@ -269,7 +269,249 @@ events = (raw.select(F.from_json(F.col("value").cast("string"), EDR_SCHEMA).alia
 
 ---
 
-## 9. Sizing and performance
+## 9. Our scenario: Redfish servers → Kafka (WebSocket + REST)
+
+Our servers expose **Redfish**. There are two ways to get data:
+- **WebSocket event stream:** the server **pushes** events and server actions (power on/off, reset, firmware update, hardware faults) the moment they happen.
+- **REST polling:** we **pull** logs, inventory and telemetry on a schedule.
+
+Both paths feed the **same Kafka cluster**, using one topic per data type, keyed by `server_id`.
+
+**In simple words:** the WebSocket is a live phone call where the server tells you immediately. REST polling is checking your mailbox every few minutes for everything else.
+
+### 9.1 Redfish data → Kafka topics
+
+| Data | Redfish source (typical) | How | Topic | Topic type |
+|---|---|---|---|---|
+| **Server actions & events** (power state, reset, alerts, status changes) | Event stream over **WebSocket** (EventService) | **Push**, real time | `redfish.events`, `redfish.actions` | Normal, 7 days |
+| **Event / system logs** (full record, gap fill) | `/redfish/v1/Systems/{id}/LogServices/{log}/Entries` | Poll 5–15 min + **on reconnect** | `redfish.logs` | Normal, 7–30 days |
+| **Management / audit logs** (logins, config changes) | `/redfish/v1/Managers/{id}/LogServices/{log}/Entries` | Poll 5–15 min | `redfish.mgmt_logs` | Normal, 30 days |
+| **Inventory** (CPU, memory, storage, NICs, firmware) | `/Systems/{id}`, `/Systems/{id}/Processors`, `/Memory`, `/Storage`, `/Chassis/{id}`, `/UpdateService/FirmwareInventory` | Poll daily **+ when a "resource changed" event arrives** | `redfish.inventory` | **Compacted** (latest per server) |
+| **Telemetry** (temperature, power, fans, CPU) | `/redfish/v1/TelemetryService/MetricReports/{id}`, Chassis environment/power/thermal resources | Poll 30 s–5 min, or metric-report events if pushed | `redfish.telemetry` | Normal, 1–3 days |
+| Server registry (which servers exist and who listens to them) | Our CMDB / onboarding API | On change | `redfish.servers` | **Compacted** |
+| Failures (bad payloads, servers that keep failing) | – | – | `redfish.dlq` | Normal |
+
+Tips:
+- Use **`ETag` + `If-None-Match`** on inventory calls. If nothing changed, the server returns **304** with no body, which saves bandwidth and API load.
+- **Event-driven inventory:** when the WebSocket says a resource changed (e.g. a DIMM was replaced or firmware updated), queue an immediate inventory refresh for **that server only** instead of polling all servers often.
+
+### 9.2 Architecture
+
+```mermaid
+flowchart LR
+  subgraph Servers[Redfish servers / BMCs]
+    WS[WebSocket<br/>event stream]
+    REST[REST APIs<br/>LogServices · Inventory · Telemetry]
+  end
+
+  REG[(redfish.servers<br/>compacted registry)] --> L
+  subgraph L[WebSocket listener pods<br/>consumer group: ws-listeners]
+    L1[listener 1<br/>owns servers in partitions 0-7]
+    L2[listener 2<br/>owns servers in partitions 8-15]
+  end
+  WS -->|push, ms latency| L
+  L -->|route by event type| EV[(redfish.events)]
+  L --> ACT[(redfish.actions)]
+  L -->|on reconnect: gap fill| REST
+  L -->|resource changed → refresh task| PR
+
+  SCH[Poll scheduler] --> PR[(poll.requests)]
+  PR --> P[REST poller workers<br/>consumer group: pollers]
+  P --> REST
+  P --> LOGS[(redfish.logs)]
+  P --> MLOG[(redfish.mgmt_logs)]
+  P --> INV[(redfish.inventory<br/>compacted)]
+  P --> TEL[(redfish.telemetry)]
+  L & P --> DLQ[(redfish.dlq)]
+  CUR[(Cursor store<br/>last event time per server + type)] <--> L & P
+
+  EV & ACT --> RT[Real-time consumer<br/>critical alerts in seconds]
+  EV & ACT & LOGS & MLOG --> ETL[ETL: normalize + dedupe<br/>+ enrich with inventory]
+  INV --> ETL
+  ETL --> S3[(S3 Parquet by hour)]
+  S3 --> DET[Hourly detection engine]
+  TEL --> TS[(ClickHouse / TSDB)] --> ML[Telemetry ML<br/>failure prediction]
+```
+
+There are **two paths**:
+- **Fast path:** a real-time consumer on `redfish.events`/`redfish.actions` alerts within seconds, e.g. unexpected power-off or a critical hardware fault.
+- **Batch path:** the hourly detection engine runs correlation and pattern rules, e.g. "3 correctable memory errors on the same DIMM within 1 hour" or "config change outside the maintenance window".
+
+### 9.3 WebSocket listener design
+
+| Concern | Solution | In simple words |
+|---|---|---|
+| **Thousands of long-lived connections** | `asyncio` + `websockets` (one pod can hold thousands of idle sockets) | One receptionist can keep many phone lines open |
+| **Which pod listens to which server?** | Listener pods form a **consumer group** on the compacted `redfish.servers` topic. Each pod opens sockets for the servers in **its** partitions. On rebalance, it closes the sockets it lost and opens the ones it gained | Kafka hands out the phone lists; if a receptionist leaves, the others take their calls |
+| **Authentication** | Redfish **session token** (`X-Auth-Token` from SessionService); re-login when it expires; credentials from a vault; TLS verification on | Show your badge, renew it when it expires |
+| **Dead connection detection** | Ping/pong heartbeat (e.g. every 20 s); treat silence as disconnected | "Are you still there?" |
+| **Reconnect** | Exponential backoff **+ jitter** (avoid all pods reconnecting at the same moment after a network blip) | Don't all redial at once |
+| **Events missed while disconnected** | On every reconnect, **gap fill**: read LogService entries since the last event time seen, and publish them | After a dropped call, ask "what did I miss?" |
+| **Duplicates (WebSocket + gap fill both deliver an event)** | Stable `event_id = hash(server_id + MessageId + timestamp)` used by both paths; downstream dedupes on it | Same letter delivered twice → shred the copy |
+| **Low latency** | Produce immediately with a small `linger.ms` (≈5 ms) and `acks=all` | Post the letter right away |
+| **Bursts (event storm)** | Bounded `asyncio.Queue` between the socket reader and the producer; Kafka absorbs the burst | A waiting room in front of the counter |
+| **Silent server** | Track "last message time" per server; the watchdog alerts if a server has been silent too long | If a friend who always texts goes quiet, check on them |
+
+### 9.4 Listener sketch
+
+```python
+import asyncio, hashlib, json, random, ssl
+import websockets
+from confluent_kafka import Producer
+
+producer = Producer({"bootstrap.servers": "kafka:9092", "acks": "all",
+                     "enable.idempotence": True, "linger.ms": 5})
+ACTION_TYPES = {"ResourceAdded", "ResourceRemoved", "ResourceUpdated"}
+
+def event_id(server_id: str, ev: dict) -> str:
+    ts = ev.get("EventTimestamp") or ev.get("Created", "")
+    return hashlib.sha256(f"{server_id}|{ev.get('MessageId')}|{ts}".encode()).hexdigest()
+
+def publish(server_id: str, ev: dict) -> None:
+    topic = "redfish.actions" if ev.get("EventType") in ACTION_TYPES else "redfish.events"
+    msg = {"event_id": event_id(server_id, ev), "server_id": server_id,
+           "event_time": ev.get("EventTimestamp"), "payload": ev}
+    producer.produce(topic, key=server_id, value=json.dumps(msg))
+    producer.poll(0)
+
+async def listen(server, cursors, stop: asyncio.Event) -> None:
+    delay = 1.0
+    while not stop.is_set():
+        try:
+            token = await login(server)                                  # Redfish SessionService
+            async with websockets.connect(server.ws_url, ssl=ssl.create_default_context(),
+                                          additional_headers={"X-Auth-Token": token},
+                                          ping_interval=20, ping_timeout=20) as ws:
+                await gap_fill(server, since=await cursors.get(server.id))   # missed while offline
+                delay = 1.0
+                async for raw in ws:
+                    for ev in json.loads(raw).get("Events", []):
+                        publish(server.id, ev)
+                        cursors.mark(server.id, ev.get("EventTimestamp"))    # persisted after producer.flush()
+        except (OSError, websockets.ConnectionClosed) as exc:
+            log.warning("ws %s disconnected: %s", server.id, exc)
+        await asyncio.sleep(min(60.0, delay) * random.uniform(0.5, 1.5))     # backoff + jitter
+        delay *= 2
+
+async def gap_fill(server, since: str | None) -> None:
+    """Read LogService entries newer than `since` and publish them with the same event_id scheme."""
+    for entry in await fetch_log_entries(server, since):                    # paginated REST call
+        publish(server.id, {"MessageId": entry["MessageId"], "EventTimestamp": entry["Created"],
+                            "Message": entry.get("Message"), "Severity": entry.get("Severity")})
+```
+- `additional_headers` is for `websockets` ≥ 14; older versions use `extra_headers`.
+- Field names can vary by vendor and Redfish version. Map them in one `normalize()` function.
+
+### 9.5 Customer adds a server → how the WebSocket gets established
+
+The onboarding API **does not** open the WebSocket itself. It publishes the new server to the compacted `redfish.servers` topic, and the listener pod that **owns that server's partition** opens the connection.
+
+**In simple words:** reception registers the new guest in the book, and the floor manager responsible for that floor goes and sets up the room.
+
+```mermaid
+sequenceDiagram
+  actor U as Customer (UI)
+  participant API as Onboarding API (FastAPI)
+  participant BMC as Server BMC (Redfish)
+  participant V as Vault
+  participant DB as Server DB
+  participant K as Kafka redfish.servers (compacted)
+  participant L as Listener pod (owns partition)
+  participant P as Poll scheduler
+
+  U->>API: POST /servers {bmc_address, username, password}
+  API->>API: validate address (no SSRF: block internal/metadata IPs)
+  API->>BMC: GET /redfish/v1 (service root, TLS check)
+  API->>BMC: POST SessionService/Sessions (verify credentials)
+  BMC-->>API: X-Auth-Token OK
+  API->>V: store credentials (secret ref)
+  API->>DB: insert server (status=PENDING)
+  API->>K: produce key=server_id {address, secret_ref, tenant, status=ACTIVE}
+  API-->>U: 202 Accepted (status=PENDING)
+
+  K->>L: registry message (partition = hash(server_id))
+  L->>V: read credentials
+  L->>BMC: login → session token
+  L->>BMC: open WebSocket event stream
+  L->>K: produce redfish.server_status {server_id, CONNECTED}
+  L->>P: queue full inventory + log backfill tasks
+  Note over U,DB: UI shows "Connected" once status = CONNECTED
+```
+
+**Steps**
+1. **Customer adds the server:** they enter the BMC address and credentials in the UI, which calls `POST /servers`.
+2. **The API validates first:**
+   - **SSRF protection:** the customer controls the address, so block private and cloud-metadata IPs (e.g. `169.254.169.254`) and internal ranges. Allow only the customer's approved network.
+   - **Redfish check:** `GET /redfish/v1` (service root) with a TLS certificate check.
+   - **Credentials:** log in through the Redfish SessionService. A bad password fails right away with a clear error.
+3. **Store and publish:**
+   - The password goes to a **vault**. The DB and Kafka keep only a `secret_ref`.
+   - The server is saved in the DB with `status = PENDING`.
+   - An `ACTIVE` record is published to `redfish.servers`:
+     ```json
+     {"server_id": "SGH123", "tenant_id": "acme", "bmc_address": "10.20.1.15",
+      "secret_ref": "vault://redfish/acme/SGH123", "status": "ACTIVE", "version": 1}
+     ```
+   - The API returns `202 Accepted`; the connection happens asynchronously.
+4. **The owning listener connects:**
+   - Kafka routes the record to a partition using `hash(server_id) % partitions`. The one pod that owns that partition in the `ws-listeners` group receives it.
+   - That pod reads the credentials from the vault, logs in, and opens the WebSocket. If your Redfish implementation needs an EventService subscription first, it creates that before connecting.
+   - It publishes `CONNECTED` (or `FAILED` + reason) to `redfish.server_status`. The UI shows the status.
+5. **Initial data:** a **full inventory** and **log backfill** task is queued on `poll.requests`, so the new server has complete data from the start. Regular polling then starts on its normal schedule.
+
+**Listener side (sketch)**
+```python
+consumer = Consumer({"bootstrap.servers": "kafka:9092", "group.id": "ws-listeners",
+                     "enable.auto.commit": False, "auto.offset.reset": "earliest",
+                     "partition.assignment.strategy": "cooperative-sticky"})
+connections: dict[str, asyncio.Task] = {}
+
+def on_revoke(consumer, partitions):
+    for server_id in servers_in(partitions):          # another pod now owns these servers
+        connections.pop(server_id).cancel()          # close their WebSockets
+
+consumer.subscribe(["redfish.servers"], on_revoke=on_revoke)
+
+async def registry_loop():
+    while True:
+        msg = await asyncio.to_thread(consumer.poll, 1.0)
+        if msg is None or msg.error():
+            continue
+        server_id = msg.key().decode()
+        if msg.value() is None:                       # tombstone = server removed
+            if task := connections.pop(server_id, None):
+                task.cancel()
+        else:
+            server = Server.from_json(msg.value())
+            if old := connections.pop(server_id, None):
+                old.cancel()                          # config/credential change → reconnect
+            if server.status == "ACTIVE":
+                connections[server_id] = asyncio.create_task(listen(server, cursors, stop))
+        consumer.commit(msg, asynchronous=False)
+```
+Because the topic is **compacted** and read from `earliest`, a **restarted or new pod** replays the latest record for every server in its partitions and reopens all the sockets automatically.
+
+**The whole server lifecycle uses the same topic**
+
+| Customer action | Message on `redfish.servers` | Listener does |
+|---|---|---|
+| Add server | `{..., status: ACTIVE}` | Login → open WebSocket → backfill |
+| Change credentials / address | Same key, new `version` | Close the socket, reconnect with the new details |
+| Pause monitoring | `status: PAUSED` | Close the socket, keep the record |
+| Remove server | **Tombstone** (key with `null` value) | Close the socket, delete the session/subscription; compaction later deletes the record |
+| Listener pod dies | (nothing) | Rebalance: another pod gets the partition, replays the registry, reconnects |
+
+### 9.6 Interview one-liner
+"Our servers expose Redfish.
+- **Events and server actions** come over a WebSocket stream in real time. Async listener pods, which share servers through a Kafka consumer group, publish them to `redfish.events` and `redfish.actions` keyed by server ID.
+- **Logs, inventory and telemetry** are polled over REST by a separate poller group and published to their own topics. Inventory is a compacted topic, and it is refreshed on resource-change events.
+- **Missed events:** on every reconnect we gap-fill from LogService, and a stable event ID removes the duplicates.
+- **Two consumers:** a real-time consumer raises critical alerts in seconds, and the hourly engine runs the correlation rules.
+- **Onboarding:** when a customer adds a server, the API checks the address (SSRF), the TLS certificate and the credentials, stores the secret in a vault, and publishes an `ACTIVE` record to the compacted `redfish.servers` topic. The listener pod that owns that partition opens the WebSocket and reports `CONNECTED`. Updates and removals are new records or tombstones on the same topic."
+
+---
+
+## 10. Sizing and performance
 
 - **Partitions:** start with the target throughput ÷ per-consumer throughput, then add headroom. For example, 100 MB/s ÷ 5 MB/s per consumer ≈ 20 → choose 24–48. Too many partitions means more memory, longer leader elections and slower rebalances.
 - **Throughput tips:** batching (`linger.ms`), compression, bigger `fetch.min.bytes`, batch writes on the consumer side, and keep processing out of the poll thread if it's slow.
@@ -278,7 +520,7 @@ events = (raw.select(F.from_json(F.col("value").cast("string"), EDR_SCHEMA).alia
 
 ---
 
-## 10. Reliability & failure handling
+## 11. Reliability & failure handling
 
 | Problem | Handling |
 |---|---|
@@ -292,7 +534,7 @@ events = (raw.select(F.from_json(F.col("value").cast("string"), EDR_SCHEMA).alia
 
 ---
 
-## 11. Security & monitoring
+## 12. Security & monitoring
 
 - **Security:**
   - **TLS** for encryption in transit
@@ -312,7 +554,7 @@ events = (raw.select(F.from_json(F.col("value").cast("string"), EDR_SCHEMA).alia
 
 ---
 
-## 12. Kafka vs alternatives
+## 13. Kafka vs alternatives
 
 | | Kafka | RabbitMQ | AWS SQS | AWS Kinesis | Pulsar |
 |---|---|---|---|---|---|
@@ -327,7 +569,7 @@ events = (raw.select(F.from_json(F.col("value").cast("string"), EDR_SCHEMA).alia
 
 ---
 
-## 13. Interview Q&A
+## 14. Interview Q&A
 
 1. **What is Kafka?** A distributed, replicated, append-only log used for high-throughput event streaming with replay.
 2. **Topic vs partition?** A topic is the logical stream; partitions are its ordered, parallel pieces stored on brokers.
@@ -349,3 +591,15 @@ events = (raw.select(F.from_json(F.col("value").cast("string"), EDR_SCHEMA).alia
 18. **How does Kafka fit the hourly detection design?** Kafka buffers and fans out the logs. The ETL normalizes them into hour partitions and closes the hour with a watermark, then Airflow runs the single-pass detection. Alert on consumer lag to protect the 1-hour SLA.
 19. **ZooKeeper vs KRaft?** KRaft keeps the metadata inside Kafka (Raft consensus) and removes ZooKeeper. It is simpler to run and the default from Kafka 4.0.
 20. **How do you make the pipeline secure?** TLS + SASL authentication, ACLs per topic, encryption at rest, secrets from a vault, and no sensitive data in plain text where avoidable.
+
+### Redfish-specific
+21. **Why use both WebSocket and REST polling?** The WebSocket gives real-time events and actions with no delay. REST is needed for full logs, inventory and telemetry, and to fill gaps after a disconnect.
+22. **How do you scale thousands of WebSocket connections?** Async I/O (`asyncio`) in each pod, with servers spread across listener pods by a Kafka consumer group on a compacted server-registry topic. A rebalance moves connections when a pod dies.
+23. **How do you avoid losing events when a WebSocket drops?** Heartbeats detect it, reconnect with backoff + jitter, then gap-fill from LogService since the last event time. A stable event ID removes the duplicates.
+24. **How do you keep inventory fresh without hammering the servers?** A compacted topic, `ETag`/`If-None-Match` (304 when unchanged), a daily full refresh, plus an immediate refresh triggered by resource-change events.
+25. **Real-time vs hourly – why both?** Real-time catches critical single events in seconds. Hourly batch rules catch patterns across many events (counts, trends, correlations with inventory).
+26. **Kafka message key for Redfish data?** `server_id`, so all data for a server stays in order on one partition and the registry, events and inventory line up per server.
+27. **How is the WebSocket established when a customer adds a server?**
+    - The API validates the address (SSRF), TLS certificate and credentials, stores the secret in a vault, and publishes an `ACTIVE` record to the compacted `redfish.servers` topic.
+    - The listener pod that owns that partition logs in, opens the WebSocket, reports `CONNECTED`, and triggers inventory/log backfill.
+    - Removal = a tombstone record. Pod failure = rebalance + replay of the compacted topic.
