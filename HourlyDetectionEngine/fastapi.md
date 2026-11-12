@@ -26,6 +26,11 @@ A Python web framework for building APIs. It is built on two libraries:
 
 ## 2. ASGI vs WSGI
 
+- **WSGI** = **Web Server Gateway Interface** (synchronous)
+- **ASGI** = **Asynchronous Server Gateway Interface** (async successor to WSGI)
+
+Both are standard "contracts" between a web server and a Python app: uvicorn speaks ASGI to FastAPI, gunicorn speaks WSGI to Flask.
+
 | | WSGI (Flask, Django classic) | ASGI (FastAPI, Starlette) |
 |---|---|---|
 | Model | One request per thread | Event loop; many requests share one thread while waiting on I/O |
