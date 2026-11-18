@@ -1,0 +1,5 @@
+fastapi>=0.110,<1
+uvicorn>=0.29,<1
+langgraph>=0.2,<2
+sentence-transformers>=3,<6
+httpx>=0.27,<1
