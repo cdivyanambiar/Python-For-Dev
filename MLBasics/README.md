@@ -13,6 +13,7 @@ Each `.py` file has plain-language comments explaining every step.
 | `05_rag_basics.py` | RAG: chunking, embeddings, vector search, prompt building, generation, per-customer filtering (reads `rag_docs/*.md`) | numpy, scikit-learn |
 | `06_text_to_sql_basics.py` | Text-to-SQL: schema prompt, generated SQL, SQL validation, tenant isolation, self-correction, device telemetry questions | standard library only |
 | `07_interview_quick_templates.py` | **What to type in a 1-hour interview**: scikit-learn templates for classification, pandas pipelines, regression, tuning, imbalanced data, clustering and saving a model, plus a cheat sheet | numpy, pandas, scikit-learn |
+| `08_mlops_basics.py` | MLOps lifecycle: data validation, experiment tracking, model registry + quality gate, serving, drift monitoring (PSI), retraining, rollback | numpy, scikit-learn |
 
 Install: `py -m pip install numpy scikit-learn` and `py -m pip install torch --index-url https://download.pytorch.org/whl/cpu`
 
