@@ -25,6 +25,24 @@ def cpu_work(n):
     return sum(i * i for i in range(n))
 
 
+def basic_thread_demo():
+    """2-minute demo: start() begins a thread, join() waits for it. Three 0.2 s calls overlap."""
+    results = {}
+
+    def download(name):
+        """Pretend API call; while it sleeps, the other threads run."""
+        time.sleep(0.2)
+        results[name] = f"{name} done"
+
+    ts = [threading.Thread(target=download, args=(n,)) for n in ("a", "b", "c")]
+    start = time.perf_counter()
+    for t in ts:
+        t.start()                                                        # begin running in the background
+    for t in ts:
+        t.join()                                                         # wait until this thread finishes
+    assert len(results) == 3 and time.perf_counter() - start < 0.5       # ~0.2 s, not 0.6 s
+
+
 def threads():
     """A thread pool overlaps waiting time: 5 calls of 0.2 s finish in about 0.2 s, not 1.0 s."""
     start = time.perf_counter()
@@ -112,6 +130,7 @@ def producer_consumer():
 
 if __name__ == "__main__":                                               # guard is required for multiprocessing on Windows
     # run every demo; any failed assert stops the script with a message
+    basic_thread_demo()
     threads()
     race_condition_and_lock()
     processes()
@@ -119,6 +138,16 @@ if __name__ == "__main__":                                               # guard
     producer_consumer()
     print("10 concurrency: all checks passed")
 
+# 2-MINUTE SCRIPT: THREADING
+#  1. What: a thread is a lightweight worker inside one process; threads share memory.
+#  2. Why: while one thread waits on network/disk/API, another runs -> good for I/O-bound work.
+#  3. Demo (basic_thread_demo): three 0.2 s calls finish in ~0.2 s. start() begins, join() waits.
+#  4. GIL: only one thread runs Python bytecode at a time, so no speed-up for CPU-bound code -> multiprocessing.
+#  5. Risk: shared data + threads = race condition (counter += 1 is read, add, write). Fix with a Lock
+#     (race_condition_and_lock ends at exactly 40,000).
+#  6. Choosing: threads for a few I/O tasks, asyncio for thousands, processes for CPU work.
+#  Follow-up: "Does threading give parallelism in Python?" Not for CPU-bound code, because of the GIL.
+#
 # Interview talking points:
 #  - Concurrency (interleaving tasks) vs parallelism (running simultaneously).
 #  - threads: shared memory, need locks; asyncio: single thread, cooperative, great for thousands of I/O calls;

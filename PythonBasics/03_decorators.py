@@ -222,6 +222,19 @@ if __name__ == "__main__":
     assert round(t.fahrenheit) == 212 and Temperature.is_valid(0) and t.expensive == 100000
     print("03 decorators: all checks passed")
 
+# 2-MINUTE SCRIPT: DECORATORS
+#  1. What: a function that takes a function, wraps it with extra behaviour, and returns the wrapper.
+#     `@timed` above `def f` means `f = timed(f)`.
+#  2. Why: add timing, logging, retry, caching or permission checks WITHOUT changing the original function.
+#  3. Demo (section 3, timed): the wrapper takes *args, **kwargs so it accepts any call, runs the ORIGINAL
+#     function, records the time, and returns the original result.
+#  4. functools.wraps keeps the original name and docstring; without it debugging and docs show `wrapper`.
+#  5. With arguments (section 2, retry): three levels (factory -> decorator -> wrapper).
+#     flaky() fails twice and succeeds on the third try.
+#  6. Real uses: retry on network errors, auth checks (section 5), caching (section 4), approval gates.
+#  Follow-up: "Decorator vs passing a function as an argument?" A decorator RETURNS a wrapped function
+#  that replaces the original; a callback is just stored and called.
+#
 # Interview talking points:
 #  - Why functools.wraps? Without it the wrapper hides the original name/docstring (breaks debugging, docs, pickling).
 #  - Decorator with arguments = 3 nested functions (factory -> decorator -> wrapper).

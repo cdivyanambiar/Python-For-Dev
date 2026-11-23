@@ -181,3 +181,11 @@ User (customer / support / SRE)
 - [ ] 5 practice questions answered aloud
 - [ ] Questions to ask prepared
 - [ ] Sleep
+
+---
+
+## 9. Networking basics
+
+Generic, vendor-neutral notes (hub, switch, MAC table, gateway, VLAN, STP, ARP, NAT, troubleshooting, Q&A) now live in [../Networking/README_Networking_Basics.md](../Networking/README_Networking_Basics.md), with a runnable demo in [../Networking/switch_gateway_sim.py](../Networking/switch_gateway_sim.py).
+
+Where it connects to this role: industrial switches/routers and cellular gateways sit in the chain device -> switch -> gateway/router -> cellular/internet -> cloud. Useful signals for anomaly detection and the chatbot are link up/down and flapping, port error counters, MAC table size, CPU/temperature, and gateway reachability.
