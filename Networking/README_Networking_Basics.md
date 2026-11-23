@@ -109,6 +109,53 @@ Faster (dedicated bandwidth per port), full duplex (send and receive at once), n
 
 ---
 
+### Uplinks and downlinks
+
+**Uplink** = a connection going toward the core, the internet or a bigger network. **Downlink** = a connection going toward end devices (servers, PCs) or lower-tier switches. It describes a cable's **position**, not a different kind of port: both are normal Ethernet ports, and a port can be an uplink on one switch and a downlink on another. Don't confuse it with "upload/download speed" on an internet plan, which is about data direction.
+
+```
+          Internet / core network
+                    ^
+                    |   UPLINK (few, fast, redundant)
+              +-----+-----+
+              |   Switch  |
+              +--+--+--+--+
+                /   |   \
+               v    v    v     DOWNLINKS (many, slower per port)
+           Server   PC   Printer
+```
+
+```mermaid
+flowchart TB
+  CORE["Core switch / router / internet"]
+  A["Access switch A"]
+  B["Access switch B"]
+  S1["Server 1"]
+  S2["Server 2"]
+  S3["Server 3"]
+  CORE ---|"uplink 40G"| A
+  CORE ---|"uplink 40G (redundant)"| B
+  A ---|"downlink 10G"| S1
+  A ---|"downlink 10G"| S2
+  B ---|"downlink 10G"| S3
+```
+
+| | Uplink | Downlink |
+|---|---|---|
+| Direction | toward core, upstream switch, router, internet | toward end devices or lower-tier switches |
+| Speed | faster (carries traffic of many devices) | slower per port |
+| Count | few | many |
+| Design concern | bottleneck, redundancy | port density, device speed |
+
+- **Oversubscription ratio** = total downlink bandwidth / total uplink bandwidth. Example: 24 downlinks x 10 Gb = 240 Gb into one 40 Gb uplink is 6:1. If many devices send at once, the uplink is the bottleneck. Access layers are often 3:1 to 5:1; storage or AI networks aim for 1:1.
+- **Redundancy:** uplinks come in pairs or bundles (link aggregation / LACP, or STP blocking one path) so one failure doesn't isolate the switch.
+- **Monitor uplinks first:** utilisation, errors, flapping and drops on an uplink affect every device below it.
+- **In HPE Synergy / OneView (public terms):** **downlinks** run through the frame midplane from the Virtual Connect module to the compute modules in the bays; **uplinks** are the module's QSFP28 ports to external LAN/SAN switches; **frame links** connect frames and satellite modules to extend the fabric. OneView groups uplink ports into an **uplink set** and ties it to the networks (VLANs) allowed through them.
+
+**Interview one-liner:** "Downlinks connect a switch to the devices below it, and uplinks connect it to the network above. Uplinks are fewer and faster, so I check the oversubscription ratio and make them redundant."
+
+---
+
 ## 5. Gateway and routing (how traffic leaves the network)
 
 **Subnet:** IP + mask define which addresses are "local". `192.168.1.10/24` means the first 24 bits are the network, so `192.168.1.0-255` is local (254 usable hosts).
