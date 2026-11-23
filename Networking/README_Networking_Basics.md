@@ -219,3 +219,44 @@ Routes come from: directly connected networks, **static** configuration, or **dy
 2. Explain, without notes, what happens from typing a URL to seeing the page.
 3. Explain a MAC flooding attack and two defences.
 4. List the first three things you check when a device "can't reach the internet".
+
+---
+
+## 11. HPE OneView and Synergy switches (one paragraph)
+
+**HPE Synergy** is HPE's composable infrastructure: a 12-bay frame holds compute modules, storage and **interconnect modules**, and the switching is built into the frame, so servers connect through the frame's midplane and not through cables to a top-of-rack switch. The interconnects are the frame's switches. In a **primary/satellite fabric**, a primary module (for example a **Virtual Connect SE 100Gb F32 module**) holds the switching intelligence and connects to the outside LAN/SAN through its QSFP28 uplink ports, while satellite modules (for example the **Synergy 50Gb Interconnect Link Module**) in other frames extend that fabric over frame-to-frame links, so one logical switch spans several frames. **HPE OneView** (run on the **Composer** appliance built into the frame, or on a separate appliance) is the software that manages all of it: you describe networks, VLANs, uplink sets and a **server profile** (which says "this server needs these network connections"), and OneView programs the interconnects and compute modules to match, then monitors health, alerts and firmware through its API. Everything above is ordinary switching underneath: the modules learn MAC addresses, carry tagged VLANs on uplinks (trunks), and forward frames to the right port, with OneView as the single control plane. Potash and Nitro are not names in HPE's public documentation, so I can't confirm them. Your understanding is that Nitro is Ethernet and Potash is FCoE; that fits how Synergy interconnects carry both LAN and storage traffic (see the table and the Ethernet vs FCoE explanation below), but confirm it with your team, along with each one's uplink speed, port count and fabric role, and note that in the table.
+
+| Name (internal) | Likely meaning (your understanding, unverified) | Role (primary / satellite) | Fill in |
+|---|---|---|---|
+| Nitro | Ethernet (LAN) switching | ? | speed, ports, firmware |
+| Potash | FCoE (Fibre Channel over Ethernet, storage) | ? | speed, ports, firmware |
+
+Quick key: **Ethernet (Nitro)** and **FCoE (Potash)**.
+
+**Ethernet vs FCoE in plain words:** Ethernet is the normal LAN: frames are forwarded by MAC address, VLANs separate networks, and it is allowed to drop frames (TCP resends them). **Fibre Channel (FC)** is the traditional storage network between servers and storage arrays (SAN). It is **lossless**: it must never drop a frame, because storage reads and writes can't tolerate loss. **FCoE** carries FC frames inside Ethernet frames, so one cable and one converged network adapter (CNA) can carry both LAN and storage traffic. To make Ethernet behave losslessly for storage, FCoE needs **Data Center Bridging**: PFC (priority flow control, pauses only the storage priority instead of dropping), ETS (reserves bandwidth per traffic class) and DCBX (devices negotiate these settings). FC addressing uses **WWNs** (world wide names) instead of MACs, and an FC switch function (FCF) handles zoning, which controls which servers may see which storage. Virtual Connect modules can present a server NIC as both an Ethernet and an FCoE function, and their uplinks can be set to Ethernet or Fibre Channel, which is why a Synergy interconnect can serve as the LAN switch and the SAN path for the same server.
+
+**Quick contrast** (codenames in brackets, per your understanding, unverified)
+
+| | Ethernet (Nitro) | FCoE / FC (Potash) |
+|---|---|---|
+| Carries | normal network traffic (LAN) | storage traffic (disk blocks, SAN) |
+| Address | MAC / IP | WWN / FC ID |
+| Loss | acceptable (TCP recovers) | must be lossless |
+| Segmentation | VLANs | VSANs and zoning |
+| Needs | switching, VLANs | DCB (PFC, ETS), FCF, zoning |
+| Latency | can vary under congestion | low and predictable |
+| Typical link speeds | 1, 10, 25, 40, 100, 400 Gb/s and up | FC: 8, 16, 32, 64, 128 Gb/s. FCoE: mostly 10 to 100 Gb/s |
+
+**Is Ethernet faster and does it carry more data?** Not by itself: speed is set by the link, not the protocol. At the same link speed they carry about the same amount of data. Ethernet scales to higher speeds sooner and costs less, so for raw top speed it is usually ahead (400 GbE exists). FCoE runs on the Ethernet link, so it gets that link's speed minus a little encapsulation overhead. The real difference is behaviour: Ethernet may drop frames, while FC/FCoE must not and gives predictable latency. Avoid saying "Ethernet is faster than FCoE" because FCoE is carried on Ethernet; compare LAN traffic with storage traffic, and speed with loss and latency guarantees.
+
+**400 Gb/s and FCoE:**
+- By design FCoE is not tied to one speed (it is FC frames in Ethernet with Data Center Bridging), so it is not "forbidden" at 400G.
+- In practice FCoE is mostly deployed at 10, 25, 40 and 100 Gb/s, and I'm not aware of mainstream 400G FCoE products. Vendors have little reason to build them: native FC kept growing (64G, 128G) and new storage designs favour NVMe over Fabrics (NVMe/TCP, NVMe/RoCE).
+- 400 GbE is generally used for LAN, spine/leaf and AI/HPC traffic, not FCoE.
+- In Synergy specifically, the interconnects discussed above top out at 100Gb ports (the VC SE 100Gb F32 can split lanes to 25Gb), so a 400G request cannot be met by those modules whatever the protocol. Confirm against the current product list.
+- Safe wording: "FCoE runs over Ethernet but is mostly used up to 100G. A customer asking for 400G is usually after Ethernet for compute or AI traffic, with storage moving to native FC or NVMe over Fabrics. I'd check the exact product limits."
+- Not verified: what a specific customer asked for, or whether any vendor ships 400G FCoE. Treat "not supported" as "not a standard or common product".
+
+**Public products to recognise:** HPE Virtual Connect SE 100Gb F32 Module (primary), HPE Synergy 50Gb Interconnect Link Module (satellite), HPE Virtual Connect SE 40Gb F8 Module, HPE Synergy 40Gb F8 Switch Module, Frame Link Module (management links between frames), Composer (OneView appliance).
+
+**Interview angle:** managing switches through an API (OneView exposes REST) is the same pattern as any fleet-management platform, so telemetry such as port status, errors, firmware state and alerts is the data an AI model or chatbot would use to detect anomalies and explain problems.
